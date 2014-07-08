@@ -5,6 +5,8 @@ var FileResolver = require('es6-module-transpiler').FileResolver;
 var formatters = require('es6-module-transpiler').formatters;
 
 var path = require('path');
+var fs = require('fs');
+var mkdirp = require('mkdirp').sync;
 var mergeTrees = require('broccoli-merge-trees');
 var helpers = require('broccoli-kitchen-sink-helpers');
 var Writer = require('broccoli-writer');
@@ -36,6 +38,8 @@ function CompileModules(inputTree, options) {
   this.setInputFiles(options.inputFiles);
   this.setOutput(options.output);
   this.setFormatter(options.formatter);
+
+  this.cache = {};
 }
 
 /**
@@ -122,11 +126,53 @@ CompileModules.prototype.write = function(readTree, destDir) {
     });
 
     var inputFiles = helpers.multiGlob(this.inputFiles, {cwd: srcDir});
+
+    // cache strategy:
+    // Look for the filepath in the cache
+    //   If hit
+    //     Stat/hash the file (helpers.hashStats)
+    //     Compare the hash against the cached hash
+    //     If hit
+    //       Write the cache'd contents to a path
+    //     If miss
+    //       Update the cache'd hash
+    //       getModule()
+    //   If miss
+    //     Add a cache entry
+    //     getModule()
+
     for (var i = 0; i < inputFiles.length; i++) {
-      container.getModule(inputFiles[i]);
+      var filepath = inputFiles[i];
+
+      var cache = this.cache[filepath];
+
+      var hash = helpers.hashStats(fs.statSync(path.join(srcDir, filepath)));
+
+      if (cache) {
+        if (cache.hash === hash) {
+          var dest = path.join(destDir, this.output, filepath);
+          mkdirp(path.dirname(dest));
+          fs.writeFileSync(dest, cache.content, {encoding: 'utf8'});
+        } else {
+          this.cache[filepath].hash = hash;
+          container.getModule(filepath);
+        }
+      } else {
+        this.cache[filepath] = { hash: hash };
+        container.getModule(filepath);
+      }
     }
 
-    container.write(path.join(destDir, this.output));
+    var outputPath = path.join(destDir, this.output);
+    container.write(outputPath);
+
+    // glob outputs so we can read 'em all back into cache
+    var outputFiles = helpers.multiGlob(this.inputFiles, {cwd: destDir, nomount: false});
+
+    outputFiles.forEach(function(filepath) {
+      this.cache[filepath].content = fs.readFileSync(path.join(outputPath, filepath), {encoding: 'utf8'});
+    }.bind(this));
+
   }.bind(this));
 };
 
